@@ -274,14 +274,17 @@ RefreshRate RefreshRateConfigs::getBestRefreshRateLocked(
         GlobalSignals* outSignalsConsidered) const {
     ATRACE_CALL();
     ALOGV("getBestRefreshRate %zu layers", layers.size());
+    static bool localIsIdle;
 
     if (outSignalsConsidered) *outSignalsConsidered = {};
     const auto setTouchConsidered = [&] {
         outSignalsConsidered->touch = true;
+        localIsIdle = false;
     };
 
     const auto setIdleConsidered = [&] {
         outSignalsConsidered->idle = true;
+        localIsIdle = true;
     };
 
     int noVoteLayers = 0;
@@ -444,6 +447,20 @@ RefreshRate RefreshRateConfigs::getBestRefreshRateLocked(
             ? getBestRefreshRate(scores.rbegin(), scores.rend())
             : getBestRefreshRate(scores.begin(), scores.end());
 
+    const auto selectivelyForceIdle = [&] {
+        ALOGV("localIsIdle: %s", localIsIdle ? "true" : "false");
+        if (localIsIdle && bestRefreshRate->getFps().greaterThanWithMargin(Fps(60.0f))) {
+            /*
+             * We heavily rely on touch to boost higher than 60 fps.
+             * Fallback to 60 fps if an higher fps was calculated.
+             */
+            ALOGV("Forcing idle");
+            return *idleRefreshRate;
+        }
+
+        return *bestRefreshRate;
+    };
+
     if (primaryRangeIsSingleRate) {
         // If we never scored any layers, then choose the rate from the primary
         // range instead of picking a random score from the app range.
@@ -453,7 +470,7 @@ RefreshRate RefreshRateConfigs::getBestRefreshRateLocked(
                   getMaxRefreshRateByPolicyLocked().getName().c_str());
             return getMaxRefreshRateByPolicyLocked();
         } else {
-            return *bestRefreshRate;
+            return selectivelyForceIdle();
         }
     }
 
@@ -479,7 +496,7 @@ RefreshRate RefreshRateConfigs::getBestRefreshRateLocked(
         return touchRefreshRate;
     }
 
-    return *bestRefreshRate;
+    return selectivelyForceIdle();
 }
 
 std::unordered_map<uid_t, std::vector<const RefreshRateConfigs::LayerRequirement*>>
@@ -837,6 +854,11 @@ void RefreshRateConfigs::getSortedRefreshRateListLocked(
     outRefreshRates->reserve(mRefreshRates.size());
     for (const auto& [type, refreshRate] : mRefreshRates) {
         if (shouldAddRefreshRate(*refreshRate)) {
+            if (refreshRate->getFps().equalsWithMargin(Fps(60.0f))) {
+                idleRefreshRate = std::make_unique<RefreshRateConfigs::RefreshRate>(*refreshRate);
+                ALOGV("idleRefreshRate set!");
+            }
+
             ALOGV("getSortedRefreshRateListLocked: mode %d added to list policy",
                   refreshRate->getModeId().value());
             outRefreshRates->push_back(refreshRate.get());
